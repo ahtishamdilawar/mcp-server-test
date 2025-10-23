@@ -5,7 +5,8 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Route, Mount
+from starlette.requests import Request
 from starlette.responses import Response
 import uvicorn
 import os
@@ -81,15 +82,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     else:
         raise ValueError(f"Unknown tool: {name}")
 
-# SSE endpoint handler
-async def handle_sse(request):
-    """Handle SSE connections from Azure AI Foundry."""
-    async with SseServerTransport("/messages") as (read_stream, write_stream):
+# SSE transport and endpoints
+# Create a single transport instance and expose:
+# - GET /sse for the SSE stream
+# - POST /messages/ for JSON-RPC messages
+sse = SseServerTransport("/messages/")
+
+async def handle_sse(request: Request) -> Response:
+    """Establish SSE connection and run the MCP server session."""
+    async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):  # type: ignore[attr-defined]
         await mcp_server.run(
             read_stream,
             write_stream,
-            mcp_server.create_initialization_options()
+            mcp_server.create_initialization_options(),
         )
+    # Return an empty Response after SSE ends to avoid NoneType call errors
     return Response()
 
 # Health check endpoint
@@ -107,9 +114,10 @@ async def health_check(request):
 # Create Starlette app
 app = Starlette(
     routes=[
-        Route("/sse", handle_sse),
-        Route("/health", health_check),
-        Route("/", health_check),
+        Route("/sse", endpoint=handle_sse, methods=["GET"]),
+        Mount("/messages/", app=sse.handle_post_message),
+        Route("/health", endpoint=health_check, methods=["GET"]),
+        Route("/", endpoint=health_check, methods=["GET"]),
     ]
 )
 
